@@ -2,10 +2,11 @@
 Displays NASA Space Apps Challenge branding, mission description, and active data mode banner.
 """
 
+from typing import Optional
 import streamlit as st
 
 
-def render_header(is_demo: bool, source_label: str):
+def render_header(is_demo: bool, source_label: str, status_message: Optional[str] = None):
     """Renders the top branding header and prototype/demo warning banner when applicable."""
     header_html = f"""
     <div class="ep-header-container">
@@ -29,7 +30,7 @@ def render_header(is_demo: bool, source_label: str):
         </div>
         <p style="color: #94A3B8; font-size: 0.92rem; line-height: 1.5; margin-top: 0.6rem; margin-bottom: 0;">
             EARTHPULSE provides high-resolution temporal analysis of Earth system parameters derived from 
-            NASA satellite observations and assimilation models (NASA POWER). Initially evaluating regional temperature 
+            NASA satellite observations and assimilation models (NASA POWER). Evaluating regional surface temperature 
             (<strong>T2M</strong>) and precipitation (<strong>PRECTOTCORR</strong>) dynamics across Kerala, India.
         </p>
     </div>
@@ -38,16 +39,16 @@ def render_header(is_demo: bool, source_label: str):
 
     # If backend data is unavailable, clearly label the dashboard as a prototype
     if is_demo:
-        demo_banner_html = """
+        detail_msg = status_message if status_message else "Displaying synthetic demonstration values for UI and visualization testing."
+        demo_banner_html = f"""
         <div class="ep-demo-banner">
             <div>
                 <strong>⚠️ DEMONSTRATION PROTOTYPE:</strong> 
-                The backend data service (<code>data_service.py</code>) is currently unpopulated. 
-                Displaying synthetic demonstration values for UI and visualization testing.
-                <strong>Do not cite or use these values as actual NASA observations.</strong>
+                {detail_msg}
+                <br><strong>Do not cite or use these sample values as actual NASA observations.</strong>
             </div>
             <div style="margin-left: 1rem; font-size: 0.78rem; opacity: 0.85; white-space: nowrap;">
-                Status: Awaiting Backend API
+                Status: Synthetic Simulation
             </div>
         </div>
         """

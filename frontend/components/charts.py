@@ -1,8 +1,9 @@
 """Plotly chart visualizations for EARTHPULSE.
-Provides interactive, dark-themed visualizations for T2M (temperature) and PRECTOTCORR (precipitation).
+Provides interactive, dark-themed visualizations for T2M (temperature) and PRECTOTCORR (precipitation),
+integrating backend annual aggregation and monthly climatology.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -43,17 +44,22 @@ def _apply_dark_axes(fig: go.Figure):
     )
 
 
-def render_temperature_charts(df: pd.DataFrame, baseline_stats: Dict[str, float], is_demo: bool):
+def render_temperature_charts(
+    df: pd.DataFrame,
+    baseline_stats: Dict[str, float],
+    is_demo: bool,
+    annual_temp_series: Optional[Dict[str, Any]] = None
+):
     """Renders interactive temperature (T2M) multi-decadal time series and rolling trends."""
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
-    # Prepare rolling 12-month average for trend detection
     df_sorted = df.sort_values("date").copy()
+    # Compute 12-month rolling average for trend visualization
     df_sorted["T2M_Rolling12"] = df_sorted["T2M"].rolling(window=12, min_periods=6).mean()
 
     fig = go.Figure()
 
-    # Raw monthly values (subtle line with dots)
+    # Raw monthly values
     fig.add_trace(go.Scatter(
         x=df_sorted["date"],
         y=df_sorted["T2M"],
@@ -63,7 +69,7 @@ def render_temperature_charts(df: pd.DataFrame, baseline_stats: Dict[str, float]
         hovertemplate="<b>Date:</b> %{x|%b %Y}<br><b>T2M:</b> %{y:.2f} °C<extra></extra>",
     ))
 
-    # 12-month moving average (bold highlight line)
+    # 12-month moving average
     fig.add_trace(go.Scatter(
         x=df_sorted["date"],
         y=df_sorted["T2M_Rolling12"],
@@ -103,11 +109,18 @@ def render_temperature_charts(df: pd.DataFrame, baseline_stats: Dict[str, float]
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_precipitation_charts(df: pd.DataFrame, baseline_stats: Dict[str, float], is_demo: bool):
-    """Renders interactive precipitation (PRECTOTCORR) dynamics and annual cumulative distributions."""
+def render_precipitation_charts(
+    df: pd.DataFrame,
+    baseline_stats: Dict[str, float],
+    is_demo: bool,
+    annual_records: Optional[List[Dict[str, Any]]] = None
+):
+    """Renders interactive precipitation dynamics and annual cumulative totals.
+
+    Uses backend annual complete-year aggregation if available.
+    """
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
-    # Subplots: Top = Monthly rainfall timeline; Bottom = Annual cumulative rainfall
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -121,12 +134,12 @@ def render_precipitation_charts(df: pd.DataFrame, baseline_stats: Dict[str, floa
 
     df_sorted = df.sort_values("date").copy()
 
-    # 1. Monthly precipitation bar chart with gradient fill
+    # 1. Monthly precipitation bar chart
     fig.add_trace(
         go.Bar(
             x=df_sorted["date"],
             y=df_sorted["PRECTOTCORR"],
-            name=f"Monthly Rainfall (mm)",
+            name="Monthly Rainfall (mm)",
             marker=dict(
                 color=df_sorted["PRECTOTCORR"],
                 colorscale=[[0, "#0E3A53"], [0.4, "#00B0FF"], [1.0, "#00E676"]],
@@ -138,17 +151,24 @@ def render_precipitation_charts(df: pd.DataFrame, baseline_stats: Dict[str, floa
         col=1
     )
 
-    # 2. Annual Cumulative Totals
-    annual_df = df_sorted.groupby("year")["PRECTOTCORR"].sum().reset_index()
+    # 2. Annual Cumulative Totals (using backend complete-year aggregation if available)
     baseline_annual = baseline_stats["baseline_annual_precip"]
+
+    if annual_records and len(annual_records) > 0:
+        annual_x = [r["year"] for r in annual_records]
+        annual_y = [r.get("total_rainfall_mm", 0.0) for r in annual_records]
+    else:
+        annual_df = df_sorted.groupby("year")["PRECTOTCORR"].sum().reset_index()
+        annual_x = annual_df["year"].tolist()
+        annual_y = annual_df["PRECTOTCORR"].tolist()
 
     fig.add_trace(
         go.Bar(
-            x=annual_df["year"],
-            y=annual_df["PRECTOTCORR"],
+            x=annual_x,
+            y=annual_y,
             name="Annual Total (mm)",
             marker=dict(
-                color=["#00E676" if val >= baseline_annual else "#F59E0B" for val in annual_df["PRECTOTCORR"]],
+                color=["#00E676" if val >= baseline_annual else "#F59E0B" for val in annual_y],
             ),
             hovertemplate="<b>Year:</b> %{x}<br><b>Annual Rainfall:</b> %{y:,.0f} mm<extra></extra>",
         ),
@@ -156,7 +176,7 @@ def render_precipitation_charts(df: pd.DataFrame, baseline_stats: Dict[str, floa
         col=1
     )
 
-    # Baseline reference on annual chart
+    # Baseline reference line on annual chart
     fig.add_hline(
         y=baseline_annual,
         line_dash="dash",
@@ -183,27 +203,37 @@ def render_precipitation_charts(df: pd.DataFrame, baseline_stats: Dict[str, floa
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_climatology_cycle_chart(df: pd.DataFrame, is_demo: bool):
+def render_climatology_cycle_chart(
+    df: pd.DataFrame,
+    is_demo: bool,
+    monthly_climatology: Optional[List[Dict[str, Any]]] = None
+):
     """Renders the mean annual climatological cycle (January through December).
 
     Highlights seasonal phenomena such as Kerala's Southwest (Jun-Aug) and Northeast (Oct-Nov) monsoons.
+    Uses backend monthly climatology if available.
     """
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
-    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    monthly_cycle = df.groupby("month").agg({
-        "T2M": "mean",
-        "PRECTOTCORR": "mean"
-    }).reindex(range(1, 13)).reset_index()
-    monthly_cycle["Month_Name"] = month_names
+    if monthly_climatology and len(monthly_climatology) == 12:
+        month_names = [m.get("month_name", "")[:3] for m in monthly_climatology]
+        precip_vals = [m.get("mean_precipitation_mm", 0.0) for m in monthly_climatology]
+        temp_vals = [m.get("mean_temperature", 0.0) for m in monthly_climatology]
+    else:
+        month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        monthly_cycle = df.groupby("month").agg({
+            "T2M": "mean",
+            "PRECTOTCORR": "mean"
+        }).reindex(range(1, 13)).reset_index()
+        precip_vals = monthly_cycle["PRECTOTCORR"].tolist()
+        temp_vals = monthly_cycle["T2M"].tolist()
 
-    # Dual axis plot: Rainfall on left bar axis, Temperature on right line axis
     fig = go.Figure()
 
     # Rainfall bars
     fig.add_trace(go.Bar(
-        x=monthly_cycle["Month_Name"],
-        y=monthly_cycle["PRECTOTCORR"],
+        x=month_names,
+        y=precip_vals,
         name="Mean Precipitation (mm)",
         yaxis="y",
         marker=dict(color="rgba(0, 210, 255, 0.65)"),
@@ -212,8 +242,8 @@ def render_climatology_cycle_chart(df: pd.DataFrame, is_demo: bool):
 
     # Temperature line
     fig.add_trace(go.Scatter(
-        x=monthly_cycle["Month_Name"],
-        y=monthly_cycle["T2M"],
+        x=month_names,
+        y=temp_vals,
         name="Mean Air Temp (°C)",
         yaxis="y2",
         mode="lines+markers",
