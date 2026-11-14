@@ -26,12 +26,22 @@ MIN_OBSERVATIONS_FOR_TREND = 3
 
 
 def is_valid_measurement(val: Any, allow_negative: bool = True) -> bool:
-    """Check if a measurement value is valid (non-null, non-missing, numeric)."""
+    """Check if a measurement value is valid (non-null, non-missing, numeric).
+
+    Args:
+        val: The measurement value to evaluate.
+        allow_negative: Whether negative values are allowed (True for temperature,
+            False for precipitation).
+
+    Returns:
+        True if the value represents a valid measurement, False otherwise.
+    """
     if val is None:
         return False
     if isinstance(val, (int, float, np.number)):
         if np.isnan(val):
             return False
+        # NASA POWER missing value indicators are typically -999 or -999.0
         if val <= -999:
             return False
         if not allow_negative and val < 0:
@@ -41,7 +51,13 @@ def is_valid_measurement(val: Any, allow_negative: bool = True) -> bool:
 
 
 def parse_record_date(month_val: Any) -> Optional[Tuple[int, int]]:
-    """Parse year and month from record 'month' field."""
+    """Parse year and month from record 'month' field.
+
+    Supports formats like '202101', 202101, or '2021-01'. Excludes 'YYYY13' or 'ANN'.
+
+    Returns:
+        (year, month_number) tuple, or None if unparseable/annual index.
+    """
     month_str = str(month_val).strip()
     if month_str.endswith("13") or month_str.upper() == "ANN":
         return None
@@ -65,7 +81,23 @@ def parse_record_date(month_val: Any) -> Optional[Tuple[int, int]]:
 
 
 def aggregate_annual_climate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate monthly records into annual mean temperature and total rainfall."""
+    """Aggregate monthly records into annual mean temperature and total rainfall.
+
+    Scientific requirement: Incomplete years are strictly excluded. All 12 valid
+    monthly values are required for each annual metric.
+
+    Args:
+        records: List of monthly records containing 'month', 'temperature', and
+            'precipitation_mm'.
+
+    Returns:
+        Dictionary containing:
+        - 'annual_records': List of dicts for complete years.
+        - 'temperature_series': Dict with 'years' and 'values' for complete temperature years.
+        - 'rainfall_series': Dict with 'years' and 'values' for complete rainfall years.
+        - 'incomplete_years': Dict detailing years excluded and reason.
+    """
+    # Group values by year and month
     year_temps: Dict[int, Dict[int, float]] = {}
     year_rain: Dict[int, Dict[int, float]] = {}
 
@@ -83,6 +115,7 @@ def aggregate_annual_climate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         if is_valid_measurement(temp, allow_negative=True):
             year_temps[year][month_num] = float(temp)
 
+        # Use precipitation_mm for total monthly depth
         precip = r.get("precipitation_mm")
         if is_valid_measurement(precip, allow_negative=False):
             year_rain[year][month_num] = float(precip)
@@ -124,6 +157,7 @@ def aggregate_annual_climate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "rainfall_complete": has_12_rain,
             }
 
+        # Include in annual_records if at least one metric is complete
         if has_12_temps or has_12_rain:
             annual_records.append({
                 "year": yr,
@@ -133,8 +167,14 @@ def aggregate_annual_climate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {
         "annual_records": annual_records,
-        "temperature_series": {"years": temp_years, "values": temp_values},
-        "rainfall_series": {"years": rain_years, "values": rain_values},
+        "temperature_series": {
+            "years": temp_years,
+            "values": temp_values,
+        },
+        "rainfall_series": {
+            "years": rain_years,
+            "values": rain_values,
+        },
         "incomplete_years": incomplete_years,
     }
 
@@ -145,10 +185,22 @@ def calculate_trend(
     metric_name: str = "temperature",
     alpha: float = 0.05,
 ) -> Dict[str, Any]:
-    """Calculate long-term trend using Theil-Sen slope and Kendall rank correlation."""
+    """Calculate long-term trend using Theil-Sen slope and Kendall rank correlation.
+
+    Args:
+        years: Sequence of annual observation years.
+        values: Sequence of aggregated annual values corresponding to the years.
+        metric_name: 'temperature' or 'rainfall'.
+        alpha: Statistical significance threshold (default: 0.05).
+
+    Returns:
+        Structured dictionary containing trend direction, slope per year/decade,
+        Kendall tau, p-value, number of observations, and scientific caveats.
+    """
     unit_yr = "°C/year" if metric_name == "temperature" else "mm/year"
     unit_dec = "°C/decade" if metric_name == "temperature" else "mm/decade"
 
+    # Filter out missing/NaN values
     valid_pairs = [
         (int(y), float(v))
         for y, v in zip(years, values)
@@ -172,12 +224,14 @@ def calculate_trend(
         "disclaimer": CAUSATION_DISCLAIMER,
     }
 
+    # Insufficient observations check
     if n_obs < MIN_OBSERVATIONS_FOR_TREND:
         return base_result
 
     x = np.array([p[0] for p in valid_pairs], dtype=np.float64)
     y = np.array([p[1] for p in valid_pairs], dtype=np.float64)
 
+    # Constant data check (zero variance)
     if np.all(np.isclose(y, y[0])):
         base_result.update({
             "trend_direction": "no detected trend",
@@ -189,6 +243,7 @@ def calculate_trend(
         })
         return base_result
 
+    # 1. Theil-Sen slope calculation
     try:
         theil_res = stats.theilslopes(y, x)
         slope_per_year = float(theil_res.slope)
@@ -197,6 +252,7 @@ def calculate_trend(
         slope_per_year = 0.0
         slope_per_decade = 0.0
 
+    # 2. Kendall rank correlation test
     try:
         tau_res = stats.kendalltau(x, y)
         tau = float(tau_res.statistic) if not np.isnan(tau_res.statistic) else 0.0
@@ -205,6 +261,7 @@ def calculate_trend(
         tau = 0.0
         p_val = 1.0
 
+    # 3. Determine trend direction based on statistical evidence
     is_significant = bool(p_val < alpha)
     if is_significant:
         if slope_per_year > 0 and tau > 0:
@@ -229,7 +286,18 @@ def calculate_trend(
 
 
 def calculate_monthly_climatology(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Calculate multi-year monthly climatology across available years."""
+    """Calculate multi-year monthly climatology across available years.
+
+    Calculates:
+    - Average temperature for each calendar month (1-12) across available years.
+    - Average monthly rainfall (mm) for each calendar month (1-12) across available years.
+
+    Args:
+        records: List of monthly climate records.
+
+    Returns:
+        List of 12 records (one per calendar month) with climatological means.
+    """
     month_temps: Dict[int, List[float]] = {m: [] for m in range(1, 13)}
     month_rains: Dict[int, List[float]] = {m: [] for m in range(1, 13)}
 
@@ -251,6 +319,7 @@ def calculate_monthly_climatology(records: List[Dict[str, Any]]) -> List[Dict[st
     for m in range(1, 13):
         temps = month_temps[m]
         rains = month_rains[m]
+
         mean_temp = round(float(np.mean(temps)), 2) if temps else None
         mean_rain = round(float(np.mean(rains)), 2) if rains else None
 
@@ -271,7 +340,17 @@ def analyze_climate_trends(
     location_name: str = "Location",
     alpha: float = 0.05,
 ) -> Dict[str, Any]:
-    """Perform complete climate trend analysis and climatology from monthly records."""
+    """Perform complete climate trend analysis and climatology from monthly records.
+
+    Args:
+        records: List of monthly records from fetch_climate_data().
+        location_name: Identifier for the geographic location (e.g., 'Kochi, Kerala').
+        alpha: Significance level for trend detection (default: 0.05).
+
+    Returns:
+        Comprehensive dictionary containing annual aggregation, trend analyses,
+        monthly climatology, and scientific disclaimers.
+    """
     aggregation = aggregate_annual_climate(records)
 
     temp_series = aggregation["temperature_series"]
