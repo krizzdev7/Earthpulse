@@ -84,7 +84,7 @@ def main():
 
     # 6. Compute & Render Climate Indicator KPI Cards
     metrics = compute_descriptive_metrics(data_res)
-    render_climate_indicator_cards(metrics)
+    render_climate_indicator_cards(metrics, show_t2m=show_t2m, show_precip=show_precip)
 
     st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
 

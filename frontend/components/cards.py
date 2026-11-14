@@ -4,10 +4,15 @@ baseline anomalies, and data provenance labeling.
 """
 
 from typing import Dict, Any
+import numpy as np
 import streamlit as st
 
 
-def render_climate_indicator_cards(metrics: Dict[str, Any]):
+def render_climate_indicator_cards(
+    metrics: Dict[str, Any],
+    show_t2m: bool = True,
+    show_precip: bool = True
+):
     """Renders responsive modern scientific KPI cards for temperature and precipitation.
 
     Adheres strictly to scientific integrity:
@@ -15,7 +20,12 @@ def render_climate_indicator_cards(metrics: Dict[str, Any]):
     - Displays backend Theil-Sen trend rates and Kendall tau significance when available on live data.
     - Avoids calculating daily extremes from monthly data.
     - Does not display fabricated trends in demo mode.
+    - Handles empty or all-missing data points cleanly with 'N/A'.
     """
+    if not show_t2m and not show_precip:
+        st.info("ℹ️ Select at least one climate variable (T2M or PRECTOTCORR) in the sidebar to view indicator cards.")
+        return
+
     is_demo = metrics["is_demo"]
     source_badge_text = "DEMO" if is_demo else "NASA POWER"
     source_badge_class = "ep-badge-demo" if is_demo else "ep-badge-live"
@@ -33,15 +43,34 @@ def render_climate_indicator_cards(metrics: Dict[str, Any]):
     temp_trend = metrics.get("temp_trend")
     rain_trend = metrics.get("rain_trend")
 
-    # Formatting anomaly signs
-    temp_sign = "+" if t2m_anomaly > 0 else ""
-    precip_sign = "+" if precip_anomaly_pct > 0 else ""
+    # Format values safely
+    t2m_mean_str = f"{t2m_mean:.2f}" if (t2m_mean is not None and not np.isnan(t2m_mean)) else "N/A"
+    t2m_min_str = f"{t2m_min:.1f}" if (t2m_min is not None and not np.isnan(t2m_min)) else "N/A"
+    t2m_max_str = f"{t2m_max:.1f}" if (t2m_max is not None and not np.isnan(t2m_max)) else "N/A"
 
-    col1, col2, col3, col4 = st.columns(4)
+    if t2m_anomaly is not None and not np.isnan(t2m_anomaly):
+        temp_sign = "+" if t2m_anomaly > 0 else ""
+        temp_anomaly_str = f"{temp_sign}{t2m_anomaly:.2f} °C vs {baseline_period} normal"
+        temp_anomaly_color = "#FF6B6B" if t2m_anomaly > 0 else "#4FACFE"
+    else:
+        temp_anomaly_str = "No baseline deviation"
+        temp_anomaly_color = "#94A3B8"
 
-    # 1. Temperature Card
-    with col1:
-        # Build trend indicator line if available
+    precip_mean_str = f"{precip_annual_mean:,.0f}" if (precip_annual_mean is not None and not np.isnan(precip_annual_mean)) else "N/A"
+    precip_peak_str = f"{precip_peak:,.1f}" if (precip_peak is not None and not np.isnan(precip_peak)) else "N/A"
+
+    if precip_anomaly_pct is not None and not np.isnan(precip_anomaly_pct):
+        precip_sign = "+" if precip_anomaly_pct > 0 else ""
+        precip_anomaly_str = f"{precip_sign}{precip_anomaly_pct:.1f}% vs {baseline_period} normal"
+        precip_anomaly_color = "#00E676" if precip_anomaly_pct >= 0 else "#F59E0B"
+    else:
+        precip_anomaly_str = "No baseline deviation"
+        precip_anomaly_color = "#94A3B8"
+
+    # Card 1 & 2: Temperature HTML
+    temp_card_1 = ""
+    temp_card_2 = ""
+    if show_t2m:
         trend_html = ""
         if temp_trend and not is_demo and temp_trend.get("slope_per_decade") is not None:
             slope = temp_trend["slope_per_decade"]
@@ -56,50 +85,43 @@ def render_climate_indicator_cards(metrics: Dict[str, Any]):
             </div>
             """
 
-        st.markdown(
-            f"""
-            <div class="ep-metric-card temp">
-                <div class="ep-card-title">
-                    <span>T2M Mean Surface Temp</span>
-                    <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
-                </div>
-                <div class="ep-card-value">
-                    {t2m_mean:.2f}<span class="unit">°C</span>
-                </div>
-                <div class="ep-card-subtext">
-                    <span style="color: {'#FF6B6B' if t2m_anomaly > 0 else '#4FACFE'}; font-weight: 700;">
-                        {temp_sign}{t2m_anomaly:.2f} °C
-                    </span>
-                    <span>vs {baseline_period} normal</span>
-                </div>
-                {trend_html}
+        temp_card_1 = f"""
+        <div class="ep-metric-card temp">
+            <div class="ep-card-title">
+                <span>T2M Mean Surface Temp</span>
+                <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    # 2. Temperature Envelope Card
-    with col2:
-        st.markdown(
-            f"""
-            <div class="ep-metric-card temp">
-                <div class="ep-card-title">
-                    <span>T2M Monthly Envelope</span>
-                    <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
-                </div>
-                <div class="ep-card-value" style="font-size: 1.55rem; padding-top: 0.25rem;">
-                    {t2m_min:.1f} <span style="font-size: 1.1rem; color: #64748B;">to</span> {t2m_max:.1f}<span class="unit">°C</span>
-                </div>
-                <div class="ep-card-subtext" style="margin-top: 0.5rem;">
-                    <span>Monthly thermal boundary</span>
-                </div>
+            <div class="ep-card-value">
+                {t2m_mean_str}<span class="unit">°C</span>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+            <div class="ep-card-subtext">
+                <span style="color: {temp_anomaly_color}; font-weight: 700;">
+                    {temp_anomaly_str}
+                </span>
+            </div>
+            {trend_html}
+        </div>
+        """
 
-    # 3. Precipitation Mean & Trend Card
-    with col3:
+        temp_card_2 = f"""
+        <div class="ep-metric-card temp">
+            <div class="ep-card-title">
+                <span>T2M Monthly Envelope</span>
+                <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
+            </div>
+            <div class="ep-card-value" style="font-size: 1.55rem; padding-top: 0.25rem;">
+                {t2m_min_str} <span style="font-size: 1.1rem; color: #64748B;">to</span> {t2m_max_str}<span class="unit">°C</span>
+            </div>
+            <div class="ep-card-subtext" style="margin-top: 0.5rem;">
+                <span>Monthly thermal boundary</span>
+            </div>
+        </div>
+        """
+
+    # Card 3 & 4: Precipitation HTML
+    precip_card_1 = ""
+    precip_card_2 = ""
+    if show_precip:
         rain_trend_html = ""
         if rain_trend and not is_demo and rain_trend.get("slope_per_decade") is not None:
             r_slope = rain_trend["slope_per_decade"]
@@ -114,44 +136,59 @@ def render_climate_indicator_cards(metrics: Dict[str, Any]):
             </div>
             """
 
-        st.markdown(
-            f"""
-            <div class="ep-metric-card precip">
-                <div class="ep-card-title">
-                    <span>Mean Annual Precip</span>
-                    <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
-                </div>
-                <div class="ep-card-value">
-                    {precip_annual_mean:,.0f}<span class="unit">mm/yr</span>
-                </div>
-                <div class="ep-card-subtext">
-                    <span style="color: {'#00E676' if precip_anomaly_pct >= 0 else '#F59E0B'}; font-weight: 700;">
-                        {precip_sign}{precip_anomaly_pct:.1f}%
-                    </span>
-                    <span>vs {baseline_period} normal</span>
-                </div>
-                {rain_trend_html}
+        precip_card_1 = f"""
+        <div class="ep-metric-card precip">
+            <div class="ep-card-title">
+                <span>Mean Annual Precip</span>
+                <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+            <div class="ep-card-value">
+                {precip_mean_str}<span class="unit">mm/yr</span>
+            </div>
+            <div class="ep-card-subtext">
+                <span style="color: {precip_anomaly_color}; font-weight: 700;">
+                    {precip_anomaly_str}
+                </span>
+            </div>
+            {rain_trend_html}
+        </div>
+        """
 
-    # 4. Peak Monthly Precipitation Card
-    with col4:
-        st.markdown(
-            f"""
-            <div class="ep-metric-card precip">
-                <div class="ep-card-title">
-                    <span>Peak Monthly Precip</span>
-                    <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
-                </div>
-                <div class="ep-card-value">
-                    {precip_peak:,.1f}<span class="unit">mm</span>
-                </div>
-                <div class="ep-card-subtext">
-                    <span>Highest single monthly deluge</span>
-                </div>
+        precip_card_2 = f"""
+        <div class="ep-metric-card precip">
+            <div class="ep-card-title">
+                <span>Peak Monthly Precip</span>
+                <span class="ep-badge {source_badge_class}">{source_badge_text}</span>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+            <div class="ep-card-value">
+                {precip_peak_str}<span class="unit">mm</span>
+            </div>
+            <div class="ep-card-subtext">
+                <span>Highest single monthly deluge</span>
+            </div>
+        </div>
+        """
+
+    # Responsive column allocation
+    if show_t2m and show_precip:
+        cols = st.columns(4)
+        with cols[0]:
+            st.markdown(temp_card_1, unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(temp_card_2, unsafe_allow_html=True)
+        with cols[2]:
+            st.markdown(precip_card_1, unsafe_allow_html=True)
+        with cols[3]:
+            st.markdown(precip_card_2, unsafe_allow_html=True)
+    elif show_t2m and not show_precip:
+        cols = st.columns(2)
+        with cols[0]:
+            st.markdown(temp_card_1, unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(temp_card_2, unsafe_allow_html=True)
+    elif show_precip and not show_t2m:
+        cols = st.columns(2)
+        with cols[0]:
+            st.markdown(precip_card_1, unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(precip_card_2, unsafe_allow_html=True)

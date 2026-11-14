@@ -3,20 +3,24 @@ Acts as a resilient integration bridge between the Streamlit frontend and backen
 (backend/data_service.py and backend/trend_analysis.py).
 
 INTEGRATION CONTRACT:
-Backend modules:
-    - backend.data_service.fetch_climate_data(latitude: float, longitude: float, start_year: int, end_year: int)
-      Returns: List[Dict[str, Any]] with keys: 'month', 'temperature', 'precipitation', 'precipitation_mm'
-    - backend.trend_analysis.analyze_climate_trends(records: List[Dict[str, Any]], location_name: str)
-      Returns: Dict[str, Any] with annual aggregation, Theil-Sen slope, Kendall tau, climatology, and disclaimer.
+Backend compatibility bridge (Option A, currently being implemented on data-analysis):
+    - backend.data_service.get_climate_data(location_id: str, start_year: int, end_year: int) -> pd.DataFrame
+      Expected DataFrame columns: ['year', 'month', 'date', 'T2M', 'PRECTOTCORR']
+      (or ['year', 'month', 'temperature', 'precipitation_mm'])
 
-If backend modules are not yet merged or if NASA POWER API encounters network/timeout errors,
+Existing backend function:
+    - backend.data_service.fetch_climate_data(latitude: float, longitude: float, start_year: int, end_year: int) -> List[Dict]
+
+Trend Analysis:
+    - backend.trend_analysis.analyze_climate_trends(records: List[Dict], location_name: str) -> Dict
+
+If backend bridge is not yet available in the local branch or NASA POWER API encounters network/timeout errors,
 this adapter cleanly falls back to synthetic demonstration data explicitly labeled as PROTOTYPE.
 """
 
 from dataclasses import dataclass
 import importlib
-import os
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -32,14 +36,7 @@ class ClimateDataResult:
     baseline_stats: Dict[str, float]
     trend_results: Optional[Dict[str, Any]] = None
     raw_records: Optional[List[Dict[str, Any]]] = None
-
-
-@st.cache_data(ttl=3600, show_spinner="Querying NASA POWER climate observations...")
-def _cached_fetch_backend_data(latitude: float, longitude: float, start_year: int, end_year: int) -> List[Dict[str, Any]]:
-    """Cached wrapper around backend.data_service.fetch_climate_data to respect NASA rate limits."""
-    data_service = importlib.import_module("backend.data_service")
-    fetch_fn = getattr(data_service, "fetch_climate_data")
-    return fetch_fn(latitude=latitude, longitude=longitude, start_year=start_year, end_year=end_year)
+    bridge_used: str = "none"  # "get_climate_data", "fetch_climate_data", or "none"
 
 
 def _parse_record_date(month_val: Any) -> Optional[Tuple[int, int]]:
@@ -65,6 +62,76 @@ def _parse_record_date(month_val: Any) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _normalize_climate_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
+    """Normalizes an incoming backend DataFrame to the standard frontend schema:
+    Columns: ['year', 'month', 'date', 'T2M', 'PRECTOTCORR']
+
+    - Preserves missing values (<= -999, None, NaN) as np.nan (NEVER converts to 0.0).
+    - Preserves temperature in Celsius.
+    - Preserves precipitation in monthly millimetres.
+    - Excludes '13' or 'ANN' summary entries.
+    """
+    df = df_in.copy()
+    col_map = {}
+
+    # Identify temperature column
+    for col in df.columns:
+        c_lower = str(col).lower()
+        if c_lower in ("t2m", "temperature", "temp", "temp_c", "air_temp"):
+            col_map[col] = "T2M"
+            break
+
+    # Identify precipitation column
+    for col in df.columns:
+        c_lower = str(col).lower()
+        if c_lower in ("prectotcorr", "precipitation_mm", "precipitation", "precip", "rainfall_mm", "rainfall"):
+            col_map[col] = "PRECTOTCORR"
+            break
+
+    df = df.rename(columns=col_map)
+
+    # Ensure year and month columns exist
+    if "year" not in df.columns or "month" not in df.columns:
+        if "date" in df.columns:
+            date_col = pd.to_datetime(df["date"], errors="coerce")
+            df["year"] = date_col.dt.year
+            df["month"] = date_col.dt.month
+        elif "month" in df.columns:
+            # Month might be 'YYYYMM' format
+            parsed_dates = [_parse_record_date(m) for m in df["month"]]
+            df["year"] = [p[0] if p else np.nan for p in parsed_dates]
+            df["month"] = [p[1] if p else np.nan for p in parsed_dates]
+
+    # Filter out annual summaries (month == 13)
+    if "month" in df.columns:
+        df = df[df["month"] != 13]
+        df = df[df["month"].between(1, 12, inclusive="both")]
+
+    # Clean missing values for T2M
+    if "T2M" in df.columns:
+        df["T2M"] = pd.to_numeric(df["T2M"], errors="coerce")
+        df.loc[df["T2M"] <= -999, "T2M"] = np.nan
+    else:
+        df["T2M"] = np.nan
+
+    # Clean missing values for PRECTOTCORR (must be non-negative)
+    if "PRECTOTCORR" in df.columns:
+        df["PRECTOTCORR"] = pd.to_numeric(df["PRECTOTCORR"], errors="coerce")
+        df.loc[df["PRECTOTCORR"] < 0, "PRECTOTCORR"] = np.nan
+    else:
+        df["PRECTOTCORR"] = np.nan
+
+    # Ensure date column
+    if "date" not in df.columns or df["date"].isnull().any():
+        df["date"] = pd.to_datetime(
+            df["year"].astype(int).astype(str) + "-" + df["month"].astype(int).astype(str).str.zfill(2) + "-01",
+            errors="coerce"
+        )
+
+    required_cols = ["year", "month", "date", "T2M", "PRECTOTCORR"]
+    return df[required_cols].sort_values("date").reset_index(drop=True)
+
+
 def _convert_backend_records_to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
     """Converts backend monthly records into the standard frontend DataFrame schema.
 
@@ -79,7 +146,7 @@ def _convert_backend_records_to_df(records: List[Dict[str, Any]]) -> pd.DataFram
             continue
         year, month_num = parsed
 
-        # Temperature handling
+        # Temperature handling (Celsius)
         temp = r.get("temperature")
         if temp is None or (isinstance(temp, (int, float, np.number)) and (temp <= -999 or np.isnan(temp))):
             t2m_val = np.nan
@@ -108,6 +175,40 @@ def _convert_backend_records_to_df(records: List[Dict[str, Any]]) -> pd.DataFram
     return df.sort_values("date").reset_index(drop=True)
 
 
+@st.cache_data(ttl=3600, show_spinner="Querying NASA POWER climate observations...")
+def _cached_fetch_backend_data(
+    location_id: str,
+    latitude: float,
+    longitude: float,
+    start_year: int,
+    end_year: int
+) -> Dict[str, Any]:
+    """Cached bridge caller supporting Option A (get_climate_data) and fallback (fetch_climate_data)."""
+    data_service = importlib.import_module("backend.data_service")
+
+    # 1. Option A: Check for get_climate_data(location_id, start_year, end_year) -> pd.DataFrame
+    get_fn = getattr(data_service, "get_climate_data", None)
+    if callable(get_fn):
+        try:
+            res_df = get_fn(location_id=location_id, start_year=start_year, end_year=end_year)
+            if isinstance(res_df, pd.DataFrame) and not res_df.empty:
+                return {"type": "dataframe", "data": res_df, "bridge": "get_climate_data"}
+        except TypeError:
+            # Fallback if get_climate_data has alternate argument names
+            res_df = get_fn(location_id, start_year, end_year)
+            if isinstance(res_df, pd.DataFrame) and not res_df.empty:
+                return {"type": "dataframe", "data": res_df, "bridge": "get_climate_data"}
+
+    # 2. Existing function: fetch_climate_data(latitude, longitude, start_year, end_year) -> List[Dict]
+    fetch_fn = getattr(data_service, "fetch_climate_data", None)
+    if callable(fetch_fn):
+        records = fetch_fn(latitude=latitude, longitude=longitude, start_year=start_year, end_year=end_year)
+        if records and len(records) > 0:
+            return {"type": "records", "data": records, "bridge": "fetch_climate_data"}
+
+    raise AttributeError("No callable climate data retrieval function found in backend.data_service")
+
+
 def load_climate_dataset(
     location_id: str,
     latitude: float,
@@ -123,37 +224,60 @@ def load_climate_dataset(
 
     Falls back to synthetic demonstration data if:
     - force_demo is True
-    - backend modules are not yet present in the workspace
+    - backend compatibility bridge is not yet present in the branch
     - NASA POWER API throws network, timeout, or payload errors
     """
     raw_records: Optional[List[Dict[str, Any]]] = None
     trend_results: Optional[Dict[str, Any]] = None
     is_demo = True
     source_label = "SYNTHETIC DEMO"
-    status_message = "Backend modules pending. Displaying synthetic demonstration data."
+    status_message = "Backend compatibility bridge pending. Displaying synthetic demonstration data."
+    bridge_used = "none"
+    df: Optional[pd.DataFrame] = None
 
     if not force_demo:
-        # Check if backend.data_service exists
         try:
-            raw_records = _cached_fetch_backend_data(
+            fetch_res = _cached_fetch_backend_data(
+                location_id=location_id,
                 latitude=latitude,
                 longitude=longitude,
                 start_year=start_year,
                 end_year=end_year
             )
-            if raw_records and len(raw_records) > 0:
+            bridge_used = fetch_res["bridge"]
+
+            if fetch_res["type"] == "dataframe":
+                df = _normalize_climate_dataframe(fetch_res["data"])
+                # Generate record representation for trend_analysis module
+                raw_records = []
+                for _, row in df.iterrows():
+                    raw_records.append({
+                        "month": f"{int(row['year'])}{int(row['month']):02d}",
+                        "temperature": row["T2M"] if not np.isnan(row["T2M"]) else None,
+                        "precipitation": round(row["PRECTOTCORR"] / 30.0, 2) if not np.isnan(row["PRECTOTCORR"]) else None,
+                        "precipitation_mm": row["PRECTOTCORR"] if not np.isnan(row["PRECTOTCORR"]) else None,
+                    })
                 is_demo = False
                 source_label = "NASA POWER (Live Observation)"
-                status_message = f"Connected to NASA POWER API (Lat: {latitude:.4f}° N, Lon: {longitude:.4f}° E)"
+                status_message = f"Connected via {bridge_used}() (Domain: {location_name})"
+
+            elif fetch_res["type"] == "records":
+                raw_records = fetch_res["data"]
+                df = _convert_backend_records_to_df(raw_records)
+                is_demo = False
+                source_label = "NASA POWER (Live Observation)"
+                status_message = f"Connected via {bridge_used}() (Lat: {latitude:.4f}° N, Lon: {longitude:.4f}° E)"
+
         except (ImportError, ModuleNotFoundError):
-            status_message = "Backend data service not found in workspace. Using synthetic demo data."
+            status_message = "Backend modules pending merge into frontend branch. Displaying synthetic demonstration data."
+        except AttributeError as a_err:
+            status_message = f"Backend bridge status: {a_err}. Displaying synthetic demonstration data."
         except RuntimeError as err:
             status_message = f"NASA POWER API Error ({err}). Fallback to demonstration data."
         except Exception as exc:
-            status_message = f"Backend service notice ({type(exc).__name__}: {exc}). Fallback to demo data."
+            status_message = f"Backend notice ({type(exc).__name__}: {exc}). Fallback to demo data."
 
-    if not is_demo and raw_records:
-        df = _convert_backend_records_to_df(raw_records)
+    if not is_demo and df is not None and raw_records:
         # Attempt to run backend trend analysis
         try:
             trend_module = importlib.import_module("backend.trend_analysis")
@@ -163,11 +287,10 @@ def load_climate_dataset(
             trend_results = None
     else:
         df = _generate_synthetic_kerala_data(start_year=start_year, end_year=end_year)
-        # Optionally run trend analysis on synthetic records if module is available
+        # Attempt to run trend analysis on synthetic records if module is available
         try:
             trend_module = importlib.import_module("backend.trend_analysis")
             analyze_fn = getattr(trend_module, "analyze_climate_trends")
-            # Convert synthetic df back to records format for trend module
             synth_records = []
             for _, row in df.iterrows():
                 synth_records.append({
@@ -205,6 +328,7 @@ def load_climate_dataset(
         baseline_stats=baseline_stats,
         trend_results=trend_results,
         raw_records=raw_records,
+        bridge_used=bridge_used,
     )
 
 
@@ -216,19 +340,19 @@ def compute_descriptive_metrics(result: ClimateDataResult) -> Dict[str, Any]:
 
     # Temperature metrics
     valid_temps = df["T2M"].dropna()
-    t2m_mean = float(valid_temps.mean()) if not valid_temps.empty else 0.0
-    t2m_min = float(valid_temps.min()) if not valid_temps.empty else 0.0
-    t2m_max = float(valid_temps.max()) if not valid_temps.empty else 0.0
-    t2m_anomaly = t2m_mean - b_stats["baseline_t2m_mean"]
+    t2m_mean = float(valid_temps.mean()) if not valid_temps.empty else np.nan
+    t2m_min = float(valid_temps.min()) if not valid_temps.empty else np.nan
+    t2m_max = float(valid_temps.max()) if not valid_temps.empty else np.nan
+    t2m_anomaly = (t2m_mean - b_stats["baseline_t2m_mean"]) if not np.isnan(t2m_mean) else np.nan
 
     # Precipitation metrics
     annual_precip_series = df.groupby("year")["PRECTOTCORR"].sum().dropna()
-    precip_annual_mean = float(annual_precip_series.mean()) if not annual_precip_series.empty else 0.0
+    precip_annual_mean = float(annual_precip_series.mean()) if not annual_precip_series.empty else np.nan
     valid_precip = df["PRECTOTCORR"].dropna()
-    precip_peak_monthly = float(valid_precip.max()) if not valid_precip.empty else 0.0
+    precip_peak_monthly = float(valid_precip.max()) if not valid_precip.empty else np.nan
 
     baseline_precip = b_stats["baseline_annual_precip"]
-    if baseline_precip > 0:
+    if baseline_precip > 0 and not np.isnan(precip_annual_mean):
         precip_anomaly_pct = ((precip_annual_mean - baseline_precip) / baseline_precip) * 100.0
     else:
         precip_anomaly_pct = 0.0
@@ -261,6 +385,7 @@ def compute_descriptive_metrics(result: ClimateDataResult) -> Dict[str, Any]:
         "incomplete_years": incomplete_years_data,
         "disclaimer": disclaimer,
         "trend_results": trends,
+        "bridge_used": result.bridge_used,
     }
 
 

@@ -51,6 +51,10 @@ def render_temperature_charts(
     annual_temp_series: Optional[Dict[str, Any]] = None
 ):
     """Renders interactive temperature (T2M) multi-decadal time series and rolling trends."""
+    if df.empty or "T2M" not in df.columns or df["T2M"].dropna().empty:
+        st.info("ℹ️ No temperature (T2M) observations available for the selected domain and time window.")
+        return
+
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
     df_sorted = df.sort_values("date").copy()
@@ -119,6 +123,10 @@ def render_precipitation_charts(
 
     Uses backend annual complete-year aggregation if available.
     """
+    if df.empty or "PRECTOTCORR" not in df.columns or df["PRECTOTCORR"].dropna().empty:
+        st.info("ℹ️ No precipitation (PRECTOTCORR) observations available for the selected domain and time window.")
+        return
+
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
     fig = make_subplots(
@@ -213,6 +221,10 @@ def render_climatology_cycle_chart(
     Highlights seasonal phenomena such as Kerala's Southwest (Jun-Aug) and Northeast (Oct-Nov) monsoons.
     Uses backend monthly climatology if available.
     """
+    if df.empty:
+        st.info("ℹ️ No climatology observations available for the selected parameters.")
+        return
+
     source_tag = "[DEMO]" if is_demo else "[NASA POWER]"
 
     if monthly_climatology and len(monthly_climatology) == 12:
