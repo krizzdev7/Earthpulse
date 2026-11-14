@@ -20,7 +20,13 @@ LOCATION_REGISTRY: Dict[str, Dict[str, Any]] = {
     "kozhikode": {"latitude": 11.2588, "longitude": 75.7804, "name": "Kozhikode, Kerala"},
     "thrissur": {"latitude": 10.5276, "longitude": 76.2144, "name": "Thrissur, Kerala"},
     "kannur": {"latitude": 11.8745, "longitude": 75.3704, "name": "Kannur, Kerala"},
+   "kerala_statewide": {
+    "latitude": 10.8505,
+    "longitude": 76.2711,
+    "name": "Kerala Statewide, India"
+},
 }
+
 
 
 def is_missing_value(val: Any) -> bool:
